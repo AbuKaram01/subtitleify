@@ -1,0 +1,27 @@
+# Rust build output
+/target/
+
+# Cargo lock for libraries (keep it for binaries)
+# Cargo.lock -> for binary
+
+# Log files
+*.log
+
+# Temporary subtitle files created during download
+temp_subs_*
+
+# YouTube cookies / session files
+cookies.txt
+*.cookie
+*.cookies
+.env
+
+# OS generated files
+.DS_Store
+Thumbs.db
+
+# Editor directories
+.vscode/
+.idea/
+*.swp
+*.swo
