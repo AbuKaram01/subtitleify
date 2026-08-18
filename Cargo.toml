@@ -1,6 +1,6 @@
 [package]
 name        = "subtitleify"
-version     = "0.1.0"
+version     = "0.2.0"
 edition     = "2021"
 description = "Download, clean, and embed YouTube subtitles into videos"
 license     = "GPL-3.0-or-later"

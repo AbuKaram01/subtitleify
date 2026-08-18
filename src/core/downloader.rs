@@ -322,38 +322,7 @@ pub fn fetch_playlist(
 
 // ── language listing ──────────────────────────────────────────────────────────
 
-fn query_sub_langs(
-    url: &str,
-    sub_type: &SubType,
-    browser: Option<&str>,
-    verbose: bool,
-) -> Vec<String> {
-    let output = build_yt_dlp(
-        &["-j", "--ignore-errors", "--no-check-certificates"],
-        browser,
-        url,
-        verbose,
-    )
-    .output();
-
-    let stdout = match output {
-        Ok(o) if !o.stdout.is_empty() => String::from_utf8_lossy(&o.stdout).to_string(),
-        _ => return Vec::new(),
-    };
-
-    let json: Value = match serde_json::from_str(&stdout) {
-        Ok(v) => v,
-        Err(e) => {
-            eprintln!("  [warn] JSON parse error: {e}");
-            return Vec::new();
-        }
-    };
-
-    let field = match sub_type {
-        SubType::Manual => "subtitles",
-        SubType::Auto => "automatic_captions",
-    };
-
+fn extract_json3_langs(json: &Value, field: &str) -> Vec<String> {
     let map = match json.get(field).and_then(|v| v.as_object()) {
         Some(m) => m,
         None => return Vec::new(),
@@ -374,6 +343,58 @@ fn query_sub_langs(
     langs
 }
 
+/// Queries one video's `-j` info once and extracts both manual and
+/// auto-generated language lists from the same response, instead of two
+/// separate `yt-dlp` calls. `Err` means the video's availability couldn't
+/// be determined at all (spawn failure, non-zero exit, unparseable
+/// output) — as opposed to `Ok` with an empty list, which means the video
+/// was reachable and genuinely has no captions of that type.
+fn query_sub_langs_both(
+    url: &str,
+    browser: Option<&str>,
+    verbose: bool,
+) -> Result<(Vec<String>, Vec<String>), String> {
+    let output = build_yt_dlp(
+        &["-j", "--ignore-errors", "--no-check-certificates"],
+        browser,
+        url,
+        verbose,
+    )
+    .output();
+
+    let stdout = match output {
+        Ok(o) if !o.stdout.is_empty() => String::from_utf8_lossy(&o.stdout).to_string(),
+        Ok(_) => return Err("yt-dlp returned no output".to_string()),
+        Err(e) => return Err(e.to_string()),
+    };
+
+    let json: Value = match serde_json::from_str(&stdout) {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("  [warn] JSON parse error: {e}");
+            return Err(format!("could not parse yt-dlp output: {e}"));
+        }
+    };
+
+    Ok((
+        extract_json3_langs(&json, "subtitles"),
+        extract_json3_langs(&json, "automatic_captions"),
+    ))
+}
+
+fn query_sub_langs(
+    url: &str,
+    sub_type: &SubType,
+    browser: Option<&str>,
+    verbose: bool,
+) -> Result<Vec<String>, String> {
+    let (manual, auto) = query_sub_langs_both(url, browser, verbose)?;
+    Ok(match sub_type {
+        SubType::Manual => manual,
+        SubType::Auto => auto,
+    })
+}
+
 /// Lists every language code available for `url` and `sub_type`, restricted
 /// to languages that offer a `json3`-format track (the only format
 /// subtitleify knows how to parse). Returns an empty list — never an
@@ -385,7 +406,23 @@ pub fn list_available_subs(
     browser: &str,
     verbose: bool,
 ) -> Vec<String> {
-    query_sub_langs(url, sub_type, opt_browser(browser), verbose)
+    query_sub_langs(url, sub_type, opt_browser(browser), verbose).unwrap_or_default()
+}
+
+/// Like [`list_available_subs`], but for both types at once, and
+/// distinguishing "reachable, zero languages of this type" (`Ok` with an
+/// empty list) from "couldn't determine at all" (`Err`) — the distinction
+/// [`list_available_subs`] deliberately collapses for its callers, who
+/// only ever care whether there's anything to download. `languages
+/// --all-videos` needs it, though: one genuinely unreachable video (e.g.
+/// private or deleted) should be skipped from the intersection, not
+/// silently zero out every other video's result.
+pub fn try_list_available_subs_both(
+    url: &str,
+    browser: &str,
+    verbose: bool,
+) -> Result<(Vec<String>, Vec<String>), String> {
+    query_sub_langs_both(url, opt_browser(browser), verbose)
 }
 
 // ── downloading ───────────────────────────────────────────────────────────────

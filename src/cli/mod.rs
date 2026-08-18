@@ -94,6 +94,10 @@ pub struct LanguagesArgs {
     #[arg(long, value_name = "URL")]
     pub url: String,
 
+    /// Check every video in a playlist (default: first only)
+    #[arg(long)]
+    pub all_videos: bool,
+
     /// Browser for cookies (auto-detected if omitted)
     #[arg(short, long, value_name = "BROWSER",
           value_parser = ["firefox", "chrome", "brave", "edge", "chromium", "opera", "vivaldi"])]

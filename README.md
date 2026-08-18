@@ -301,6 +301,14 @@ Not sure what's available before writing a `--type` language list? List every ma
 subtitleify languages --url "https://youtube.com/watch?v=..."
 ```
 
+For playlists, this only reports what the first video has by default, then assumes the rest match. That's a safe bet for auto-generated captions (YouTube generates them the same way playlist-wide), but manual captions are set per video by the channel owner and can vary. To be sure, add `--all-videos` to check every video and list only the languages common to all of them:
+
+```bash
+subtitleify languages --url "https://youtube.com/playlist?list=..." --all-videos
+```
+
+Videos that can't be reached (private, deleted, or a transient failure) are skipped rather than zeroing out the result, and the output notes it when not every video could be checked, e.g. `(common to 3/4 — 1 unreachable)`. This flag only affects playlist URLs — passed with a single video URL, it's silently ignored.
+
 ### Mixing manual and auto in one command
 
 `--type` takes a type (`manual`/`auto`) followed by a comma-separated language list for that type, and can be repeated to mix types in a single command instead of running `download` twice:
@@ -396,6 +404,7 @@ This is the fastest way to see *why* something silently comes back empty — e.g
 |Flag|Short|Description|
 |---|---|---|
 |`--url`||YouTube video or playlist URL|
+|`--all-videos`||Playlists only — checks every video and lists just the languages common to all of them, instead of only the first (see [above](#checking-available-languages-first))|
 |`--browser`|`-b`|Browser used for cookie authentication|
 |`--verbose`|`-v`|Show yt-dlp's own output|
 

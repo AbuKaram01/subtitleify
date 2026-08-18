@@ -12,7 +12,7 @@ use crate::core::{
     downloader::{
         detect_browser, download_with_retry, fetch_playlist, get_video_title, is_playlist_url,
         is_valid_youtube_url, list_available_subs, po_token_provider_reachable, require_deno,
-        require_yt_dlp, resolve_output_dir, temp_id,
+        require_yt_dlp, resolve_output_dir, temp_id, try_list_available_subs_both,
     },
     parser::process_json3,
     types::{SubFormat, SubType},
@@ -78,10 +78,13 @@ pub fn run(args: DownloadArgs, verbose: bool) {
 /// what's available before picking `download --type` language codes.
 ///
 /// A playlist URL (or a video URL that also carries a `list=` param) is
-/// resolved to its first video first — matching `download`'s own playlist
-/// handling — instead of being probed as-is: yt-dlp's `-j` on a playlist
-/// prints one JSON object per video, and this command only ever expects
-/// one, which produced a "trailing characters" parse error.
+/// resolved to its first video by default — matching `download`'s own
+/// playlist handling — instead of being probed as-is: yt-dlp's `-j` on a
+/// playlist prints one JSON object per video, and this command only ever
+/// expects one, which produced a "trailing characters" parse error.
+/// `--all-videos` opts into checking every video instead and reporting
+/// only the languages common to all of them — see
+/// [`run_list_languages_all_videos`].
 pub fn run_list_languages(args: LanguagesArgs, verbose: bool) {
     require_yt_dlp().unwrap_or_else(|e| fail(e));
     require_deno().unwrap_or_else(|e| fail(e));
@@ -99,6 +102,11 @@ pub fn run_list_languages(args: LanguagesArgs, verbose: bool) {
     show_browser(&browser);
     warn_if_po_token_provider_unreachable();
 
+    if is_playlist_url(&url) && args.all_videos {
+        run_list_languages_all_videos(&url, &browser, verbose);
+        return;
+    }
+
     let probe_url = if is_playlist_url(&url) {
         resolve_first_video_url(&url, &browser, verbose)
     } else {
@@ -113,6 +121,81 @@ pub fn run_list_languages(args: LanguagesArgs, verbose: bool) {
 
     print_language_group("Manual (community)", &manual);
     print_language_group("Auto-generated", &auto);
+    println!();
+}
+
+/// `subtitleify languages --all-videos` on a playlist: checks every video
+/// (one `yt-dlp -j` call each, covering both types at once — see
+/// [`try_list_available_subs_both`]) and reports, per type, only the
+/// languages common to every video. A video whose availability couldn't
+/// be determined (private, deleted, a transient failure, …) is skipped
+/// from the intersection entirely rather than treated as having zero
+/// languages, so one broken video doesn't silently zero out the whole
+/// result — see [`print_common_language_group`] for how that's surfaced.
+fn run_list_languages_all_videos(url: &str, browser: &str, verbose: bool) {
+    println!();
+    let pb = make_spinner("Fetching playlist info…".to_string(), verbose);
+    let playlist = match fetch_playlist(url, browser, verbose) {
+        Ok(p) => {
+            pb.finish_and_clear();
+            p
+        }
+        Err(e) => {
+            pb.finish_and_clear();
+            fail(format!("{e}"));
+        }
+    };
+
+    if playlist.videos.is_empty() {
+        fail("Playlist is empty.");
+    }
+
+    println!(
+        "  {}  {}  {}",
+        style("▶").dim(),
+        style(&playlist.title).bold(),
+        style(format!("({} videos)", playlist.videos.len())).dim()
+    );
+    println!();
+
+    let total = playlist.videos.len();
+    let mut manual_common: Option<Vec<String>> = None;
+    let mut auto_common: Option<Vec<String>> = None;
+    let mut checked = 0usize;
+
+    for (i, video) in playlist.videos.iter().enumerate() {
+        let pb = make_spinner(format!("Checking video {}/{total}…", i + 1), verbose);
+        let result = try_list_available_subs_both(&video.url, browser, verbose);
+        pb.finish_and_clear();
+
+        let (manual, auto) = match result {
+            Ok(pair) => pair,
+            Err(_) => continue,
+        };
+        checked += 1;
+
+        manual_common = Some(match manual_common {
+            None => manual,
+            Some(prev) => prev.into_iter().filter(|l| manual.contains(l)).collect(),
+        });
+        auto_common = Some(match auto_common {
+            None => auto,
+            Some(prev) => prev.into_iter().filter(|l| auto.contains(l)).collect(),
+        });
+    }
+
+    print_common_language_group(
+        "Manual (community)",
+        &manual_common.unwrap_or_default(),
+        checked,
+        total,
+    );
+    print_common_language_group(
+        "Auto-generated",
+        &auto_common.unwrap_or_default(),
+        checked,
+        total,
+    );
     println!();
 }
 
@@ -152,6 +235,22 @@ fn resolve_first_video_url(url: &str, browser: &str, verbose: bool) -> String {
     playlist.videos[0].url.clone()
 }
 
+/// Prints one `code  Display Name` line, padded to `code_width`, or just
+/// the bare code if [`lang_display_name`] doesn't recognize it (avoids an
+/// ugly "code   code" repeat).
+fn print_language_line(lang: &str, code_width: usize) {
+    let name = lang_display_name(lang);
+    if name == lang {
+        println!("     {}", style(lang).cyan());
+    } else {
+        println!(
+            "     {}  {}",
+            style(format!("{lang:<code_width$}")).cyan(),
+            style(name).dim()
+        );
+    }
+}
+
 /// Prints one labeled block of `subtitleify languages` output — e.g. all
 /// manual or all auto-generated languages — as one `code  Display Name`
 /// line per language, or a "none available" line if `languages` is empty.
@@ -180,16 +279,57 @@ fn print_language_group(label: &str, languages: &[String]) {
     // bytes toward the width and throw the alignment off.
     let code_width = languages.iter().map(String::len).max().unwrap_or(0);
     for lang in languages {
-        let name = lang_display_name(lang);
-        if name == *lang {
-            println!("     {}", style(lang).cyan());
-        } else {
-            println!(
-                "     {}  {}",
-                style(format!("{lang:<code_width$}")).cyan(),
-                style(name).dim()
-            );
-        }
+        print_language_line(lang, code_width);
+    }
+}
+
+/// Prints one `--all-videos` result block: the intersection across every
+/// checked video, with a header noting how many of the playlist's videos
+/// that's based on. `checked` can be less than `total` when some videos
+/// were skipped as unreachable (see [`run_list_languages_all_videos`]).
+fn print_common_language_group(label: &str, languages: &[String], checked: usize, total: usize) {
+    println!();
+    if checked == 0 {
+        println!(
+            "  {}  {}  {}",
+            style("✗").red().bold(),
+            label,
+            style("no videos were reachable").dim()
+        );
+        return;
+    }
+    if languages.is_empty() {
+        println!(
+            "  {}  {}  {}",
+            style("✗").red().bold(),
+            label,
+            style("none common to every video checked").dim()
+        );
+        return;
+    }
+
+    let scope = if checked == total {
+        format!("common to all {total} videos")
+    } else {
+        format!(
+            "common to {checked}/{total} — {} unreachable",
+            total - checked
+        )
+    };
+
+    println!(
+        "  {}  {}  {} language{}  {}",
+        style("✓").green().bold(),
+        label,
+        style(languages.len()).cyan().bold(),
+        if languages.len() == 1 { "" } else { "s" },
+        style(format!("({scope})")).dim()
+    );
+    println!();
+
+    let code_width = languages.iter().map(String::len).max().unwrap_or(0);
+    for lang in languages {
+        print_language_line(lang, code_width);
     }
 }
 
